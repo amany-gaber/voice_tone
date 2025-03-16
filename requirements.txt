@@ -1,6 +1,5 @@
-pydub 
-io
-soundfile 
-onnxruntime 
-fastapi 
-numpy 
+fastapi
+uvicorn
+numpy
+torch
+onnxruntime
