@@ -1,8 +1,8 @@
 fastapi
 uvicorn
-numpy
-torch==2.0.1  # تأكد أن هذا متوافق مع ONNX
-onnxruntime==1.13.1
+numpy==1.26.0  # إصدار متوافق مع Python 3.12
+torch==2.2.0  # أحدث إصدار متاح
+onnxruntime==1.16.0
 pydub
 soundfile
 requests
