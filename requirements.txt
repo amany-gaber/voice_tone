@@ -3,3 +3,5 @@ uvicorn
 numpy
 torch
 onnxruntime
+pydub
+soundfile
