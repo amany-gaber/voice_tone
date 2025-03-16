@@ -7,20 +7,21 @@ from pydub import AudioSegment
 
 app = FastAPI()
 
-# Load the model
+# Load the ONNX model
 model_path = r"wav2vec2_emotion.onnx"
 session = ort.InferenceSession(model_path)
 
-emotion_labels = ["calm", "neutral", "anxiety", "confidence"]
+# Ensure labels are correctly mapped (Use `print(id2label)` from your training code to confirm)
+id2label = {0: "calm", 1: "neutral", 2: "anxiety", 3: "confidence"}
 
-# Convert MP3/OGG to WAV if needed
+# Function to convert MP3/OGG to WAV if needed
 def convert_audio_to_wav(audio_bytes, format):
     audio = AudioSegment.from_file(io.BytesIO(audio_bytes), format=format)
     wav_io = io.BytesIO()
     audio.export(wav_io, format="wav")
     return wav_io.getvalue()
 
-# Preprocess the audio file
+# Function to preprocess the audio file
 def preprocess_audio(audio_bytes, file_extension):
     if file_extension in ["mp3", "ogg"]:
         audio_bytes = convert_audio_to_wav(audio_bytes, file_extension)
@@ -57,16 +58,9 @@ async def predict_audio(file: UploadFile = File(...)):
 
     # Get top 2 emotions
     top_2_indices = np.argsort(probabilities)[-2:][::-1]  # Get indices of top 2 emotions
+    top_2_emotions = {id2label[i]: f"{round(probabilities[i] * 100)}%" for i in top_2_indices}
 
-    # Format results as percentages
-    top_2_emotions = {
-        emotion_labels[i]: f"{round(probabilities[i] * 100)}%" for i in top_2_indices
-    }
+    # Create response string in the required format
+    response_text = f"Top 2 emotions ({', '.join([f'{k}: {v}' for k, v in top_2_emotions.items()])})"
 
-    # Create response text
-    result_text = ", ".join([f"{k}: {v}" for k, v in top_2_emotions.items()])
-
-    return [
-         "Top 2 predicted emotions",
-         result_text
-    ]
+    return {"top_emotions": response_text}
