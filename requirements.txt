@@ -2,6 +2,6 @@ fastapi
 uvicorn
 numpy
 torch
-onnxruntime
 pydub
 soundfile
+onnxruntime==1.13.1
