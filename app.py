@@ -8,10 +8,10 @@ from pydub import AudioSegment
 app = FastAPI()
 
 # Load the ONNX model
-model_path = r"wav2vec2_emotion.onnx"
+model_path = "wav2vec2_emotion.onnx"
 session = ort.InferenceSession(model_path)
 
-# Ensure labels are correctly mapped (Use `print(id2label)` from your training code to confirm)
+# Ensure labels are correctly mapped
 id2label = {0: "calm", 1: "neutral", 2: "anxiety", 3: "confidence"}
 
 # Function to convert MP3/OGG to WAV if needed
@@ -36,7 +36,7 @@ def preprocess_audio(audio_bytes, file_extension):
 
 # Softmax function to convert logits to probabilities
 def softmax(logits):
-    exp_logits = np.exp(logits - np.max(logits))  # Improve numerical stability
+    exp_logits = np.exp(logits - np.max(logits))
     return exp_logits / np.sum(exp_logits)
 
 @app.post("/predict/")
@@ -57,7 +57,7 @@ async def predict_audio(file: UploadFile = File(...)):
     probabilities = softmax(predicted_logits)
 
     # Get top 2 emotions
-    top_2_indices = np.argsort(probabilities)[-2:][::-1]  # Get indices of top 2 emotions
+    top_2_indices = np.argsort(probabilities)[-2:][::-1]
     top_2_emotions = {id2label[i]: f"{round(probabilities[i] * 100)}%" for i in top_2_indices}
 
     # Create response string in the required format
