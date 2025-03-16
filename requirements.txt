@@ -1,0 +1,6 @@
+pydub 
+io
+soundfile 
+onnxruntime 
+fastapi 
+numpy 
