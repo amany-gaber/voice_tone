@@ -8,9 +8,22 @@ import os
 
 app = FastAPI()
 
-# Load the ONNX model
-model_path = os.path.join(os.path.dirname(__file__), "wav2vec2_emotion.onnx")
-session = ort.InferenceSession(model_path)
+# More reliable way to reference the model file
+try:
+    # Try direct path first
+    model_path = "wav2vec2_emotion.onnx"
+    if not os.path.exists(model_path):
+        # Try absolute path within app directory
+        model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wav2vec2_emotion.onnx")
+    
+    print(f"Loading model from: {model_path}")
+    print(f"File exists: {os.path.exists(model_path)}")
+    
+    session = ort.InferenceSession(model_path)
+except Exception as e:
+    print(f"Error loading model: {e}")
+    # Provide fallback or raise clear error
+    raise Exception(f"Failed to load ONNX model: {e}")
 
 # Ensure labels are correctly mapped
 id2label = {0: "calm", 1: "neutral", 2: "anxiety", 3: "confidence"}
