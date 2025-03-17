@@ -64,3 +64,8 @@ async def predict_audio(file: UploadFile = File(...)):
     response_text = f"Top 2 emotions ({', '.join([f'{k}: {v}' for k, v in top_2_emotions.items()])})"
 
     return {"top_emotions": response_text}
+    
+    
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
