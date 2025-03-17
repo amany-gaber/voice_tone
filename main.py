@@ -4,8 +4,10 @@ import logging
 import numpy as np
 import onnxruntime as ort
 import soundfile as sf
+import requests
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from pydub import AudioSegment
+from pathlib import Path
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -14,18 +16,52 @@ logger = logging.getLogger(__name__)
 # Initialize FastAPI app
 app = FastAPI()
 
-# Root endpoint for health check
-@app.get("/")
-async def root():
-    return {"status": "online", "message": "API is running"}
-
 # Global variable for model session
 session = None
+
+# Function to download model from cloud storage if needed
+def download_model_if_needed():
+    model_path = os.environ.get("MODEL_PATH", "wav2vec2_emotion.onnx")
+    model_url = os.environ.get("MODEL_URL", None)
+    
+    # If model doesn't exist locally and URL is provided, download it
+    if not os.path.exists(model_path) and model_url:
+        try:
+            logger.info(f"Model not found locally. Downloading from {model_url}")
+            os.makedirs(os.path.dirname(model_path) if os.path.dirname(model_path) else '.', exist_ok=True)
+            
+            with open(model_path, "wb") as f:
+                response = requests.get(model_url, stream=True)
+                if not response.ok:
+                    logger.error(f"Download failed with status code: {response.status_code}")
+                    return False
+                
+                total_size = int(response.headers.get('content-length', 0))
+                downloaded = 0
+                chunk_size = 8192
+                
+                for chunk in response.iter_content(chunk_size=chunk_size):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total_size > 0:
+                            logger.info(f"Downloaded {downloaded}/{total_size} bytes ({(downloaded/total_size)*100:.1f}%)")
+            
+            logger.info(f"Model downloaded successfully to {model_path}")
+            return True
+        except Exception as e:
+            logger.error(f"Error downloading model: {str(e)}")
+            return False
+    return os.path.exists(model_path)
 
 # Load the ONNX model with improved error handling
 def load_model():
     global session
     try:
+        # First check if we need to download the model
+        if not download_model_if_needed():
+            logger.warning("Model not available for download, continuing with local search")
+        
         # List all directories and files recursively to help debug
         logger.info("Starting model loading process")
         all_files = []
@@ -38,6 +74,7 @@ def load_model():
         
         # Try multiple possible locations
         possible_paths = [
+            os.environ.get("MODEL_PATH", "wav2vec2_emotion.onnx"),
             "wav2vec2_emotion.onnx",
             "./wav2vec2_emotion.onnx",
             os.path.join(os.path.dirname(__file__), "wav2vec2_emotion.onnx"),
@@ -51,9 +88,12 @@ def load_model():
         
         # Check which paths exist and log their size
         for path in possible_paths:
-            exists = os.path.exists(path)
-            size = os.path.getsize(path) if exists else "N/A"
-            logger.info(f"Path: {path}, Exists: {exists}, Size: {size} bytes")
+            try:
+                exists = os.path.exists(path)
+                size = os.path.getsize(path) if exists else "N/A"
+                logger.info(f"Path: {path}, Exists: {exists}, Size: {size if exists else 'N/A'} bytes")
+            except Exception as e:
+                logger.warning(f"Error checking path {path}: {str(e)}")
         
         # Find first valid path
         model_path = next((path for path in possible_paths if os.path.exists(path)), None)
@@ -85,6 +125,15 @@ def load_model():
     except Exception as e:
         logger.error(f"Error loading model: {str(e)}")
         return False
+
+# Root endpoint for health check
+@app.get("/")
+async def root():
+    return {
+        "status": "online", 
+        "message": "API is running", 
+        "model_loaded": session is not None
+    }
 
 # Try to load the model on startup
 model_loaded = load_model()
@@ -174,11 +223,13 @@ async def predict_audio(file: UploadFile = File(...)):
 @app.get("/debug")
 async def debug():
     try:
-        # Get environment variables
-        env_vars = {k: v for k, v in os.environ.items()}
+        # Get environment variables (hide sensitive info)
+        env_vars = {k: "***" if "SECRET" in k or "KEY" in k or "TOKEN" in k or "PASSWORD" in k or "URL" in k else v 
+                   for k, v in os.environ.items()}
         
         # Check for model in various locations
         possible_paths = [
+            os.environ.get("MODEL_PATH", "wav2vec2_emotion.onnx"),
             "wav2vec2_emotion.onnx",
             "./wav2vec2_emotion.onnx",
             os.path.join(os.path.dirname(__file__), "wav2vec2_emotion.onnx"),
@@ -222,6 +273,20 @@ async def debug():
         except Exception as e:
             all_files = [f"Error walking directory: {str(e)}"]
         
+        # Check disk space
+        disk_info = {}
+        try:
+            import shutil
+            disk = shutil.disk_usage("/")
+            disk_info = {
+                "total_gb": disk.total / (1024**3),
+                "used_gb": disk.used / (1024**3),
+                "free_gb": disk.free / (1024**3),
+                "percent_used": disk.used / disk.total * 100
+            }
+        except:
+            disk_info = {"error": "Could not get disk info"}
+        
         # Check memory usage
         memory_info = {}
         try:
@@ -250,6 +315,7 @@ async def debug():
             "python_version": os.sys.version,
             "model_loaded": session is not None,
             "memory_usage": memory_info,
+            "disk_info": disk_info,
             "onnxruntime_info": ort_info
         }
     except Exception as e:
@@ -269,4 +335,5 @@ async def reload_model():
 # Main execution block
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
