@@ -4,11 +4,12 @@ import onnxruntime as ort
 import soundfile as sf
 import io
 from pydub import AudioSegment
+import os
 
 app = FastAPI()
 
 # Load the ONNX model
-model_path = "wav2vec2_emotion.onnx"
+model_path = os.path.join(os.path.dirname(__file__), "wav2vec2_emotion.onnx")
 session = ort.InferenceSession(model_path)
 
 # Ensure labels are correctly mapped
