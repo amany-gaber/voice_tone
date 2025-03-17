@@ -1,32 +1,60 @@
 import numpy as np
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, UploadFile, HTTPException
 import onnxruntime as ort
 import soundfile as sf
 import io
 from pydub import AudioSegment
 import os
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
-# More reliable way to reference the model file
-try:
-    # Try direct path first
-    model_path = "wav2vec2_emotion.onnx"
-    if not os.path.exists(model_path):
-        # Try absolute path within app directory
-        model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wav2vec2_emotion.onnx")
-    
-    print(f"Loading model from: {model_path}")
-    print(f"File exists: {os.path.exists(model_path)}")
-    
-    session = ort.InferenceSession(model_path)
-except Exception as e:
-    print(f"Error loading model: {e}")
-    # Provide fallback or raise clear error
-    raise Exception(f"Failed to load ONNX model: {e}")
+# Add a simple root endpoint for healthcheck
+@app.get("/")
+async def root():
+    return {"status": "online", "message": "API is running"}
 
-# Ensure labels are correctly mapped
-id2label = {0: "calm", 1: "neutral", 2: "anxiety", 3: "confidence"}
+# Load the ONNX model with better error handling
+try:
+    # Try different paths to find the model
+    possible_paths = [
+        "wav2vec2_emotion.onnx",  # Direct path
+        os.path.join(os.path.dirname(__file__), "wav2vec2_emotion.onnx"),  # Relative to file
+        os.path.join(os.getcwd(), "wav2vec2_emotion.onnx"),  # Current working directory
+    ]
+    
+    model_path = None
+    for path in possible_paths:
+        logger.info(f"Checking path: {path}")
+        if os.path.exists(path):
+            model_path = path
+            logger.info(f"Found model at: {path}")
+            break
+    
+    if model_path is None:
+        logger.error("Model file not found in any of the expected locations")
+        raise FileNotFoundError("Model file not found")
+    
+    # Check file size
+    file_size = os.path.getsize(model_path) / (1024 * 1024)  # Size in MB
+    logger.info(f"Model file size: {file_size:.2f} MB")
+    
+    # Load the model
+    logger.info("Loading ONNX model...")
+    session = ort.InferenceSession(model_path)
+    logger.info("Model loaded successfully")
+    
+    # Ensure labels are correctly mapped
+    id2label = {0: "calm", 1: "neutral", 2: "anxiety", 3: "confidence"}
+    
+except Exception as e:
+    logger.error(f"Error loading model: {str(e)}")
+    # Create a placeholder session that will raise a clear error when used
+    session = None
 
 # Function to convert MP3/OGG to WAV if needed
 def convert_audio_to_wav(audio_bytes, format):
@@ -50,11 +78,14 @@ def preprocess_audio(audio_bytes, file_extension):
 
 # Softmax function to convert logits to probabilities
 def softmax(logits):
-    exp_logits = np.exp(logits - np.max(logits))
+    exp_logits = np.exp(logits - np.max(logits))  # Improve numerical stability
     return exp_logits / np.sum(exp_logits)
 
 @app.post("/predict/")
 async def predict_audio(file: UploadFile = File(...)):
+    if session is None:
+        raise HTTPException(status_code=503, detail="Model not loaded. Please check server logs.")
+    
     file_extension = file.filename.split(".")[-1].lower()
     supported_formats = ["wav", "mp3", "ogg"]
 
@@ -71,15 +102,14 @@ async def predict_audio(file: UploadFile = File(...)):
     probabilities = softmax(predicted_logits)
 
     # Get top 2 emotions
-    top_2_indices = np.argsort(probabilities)[-2:][::-1]
+    top_2_indices = np.argsort(probabilities)[-2:][::-1]  # Get indices of top 2 emotions
     top_2_emotions = {id2label[i]: f"{round(probabilities[i] * 100)}%" for i in top_2_indices}
 
     # Create response string in the required format
     response_text = f"Top 2 emotions ({', '.join([f'{k}: {v}' for k, v in top_2_emotions.items()])})"
 
     return {"top_emotions": response_text}
-    
-    
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
