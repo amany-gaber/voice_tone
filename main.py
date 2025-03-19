@@ -1,339 +1,99 @@
-import os
-import io
-import logging
-import numpy as np
-import onnxruntime as ort
-import soundfile as sf
-import requests
 from fastapi import FastAPI, File, UploadFile, HTTPException
-from pydub import AudioSegment
-from pathlib import Path
+from fastapi.middleware.cors import CORSMiddleware
+import numpy as np
+import librosa
+import onnxruntime
+import io
+import soundfile as sf
+from pydantic import BaseModel
+from typing import List, Optional
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+app = FastAPI(title="Voice Tone Analysis API")
 
-# Initialize FastAPI app
-app = FastAPI()
+# Enable CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# Global variable for model session
-session = None
+# Load the ONNX model
+try:
+    onnx_session = onnxruntime.InferenceSession("wav2vec2_emotion.onnx")
+    input_name = onnx_session.get_inputs()[0].name
+    print("Model loaded successfully!")
+except Exception as e:
+    print(f"Error loading model: {e}")
 
-# Function to download model from cloud storage if needed
-def download_model_if_needed():
-    model_path = os.environ.get("MODEL_PATH", "wav2vec2_emotion.onnx")
-    model_url = os.environ.get("MODEL_URL", None)
-    
-    # If model doesn't exist locally and URL is provided, download it
-    if not os.path.exists(model_path) and model_url:
-        try:
-            logger.info(f"Model not found locally. Downloading from {model_url}")
-            os.makedirs(os.path.dirname(model_path) if os.path.dirname(model_path) else '.', exist_ok=True)
-            
-            with open(model_path, "wb") as f:
-                response = requests.get(model_url, stream=True)
-                if not response.ok:
-                    logger.error(f"Download failed with status code: {response.status_code}")
-                    return False
-                
-                total_size = int(response.headers.get('content-length', 0))
-                downloaded = 0
-                chunk_size = 8192
-                
-                for chunk in response.iter_content(chunk_size=chunk_size):
-                    if chunk:
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        if total_size > 0:
-                            logger.info(f"Downloaded {downloaded}/{total_size} bytes ({(downloaded/total_size)*100:.1f}%)")
-            
-            logger.info(f"Model downloaded successfully to {model_path}")
-            return True
-        except Exception as e:
-            logger.error(f"Error downloading model: {str(e)}")
-            return False
-    return os.path.exists(model_path)
+# Define emotion labels
+emotion_labels = ["angry", "happy", "neutral", "sad"]
 
-# Load the ONNX model with improved error handling
-def load_model():
-    global session
-    try:
-        # First check if we need to download the model
-        if not download_model_if_needed():
-            logger.warning("Model not available for download, continuing with local search")
-        
-        # List all directories and files recursively to help debug
-        logger.info("Starting model loading process")
-        all_files = []
-        for root, dirs, files in os.walk('.', topdown=True):
-            for file in files:
-                if file.endswith('.onnx'):
-                    all_files.append(os.path.join(root, file))
-        
-        logger.info(f"Found ONNX files: {all_files}")
-        
-        # Try multiple possible locations
-        possible_paths = [
-            os.environ.get("MODEL_PATH", "wav2vec2_emotion.onnx"),
-            "wav2vec2_emotion.onnx",
-            "./wav2vec2_emotion.onnx",
-            os.path.join(os.path.dirname(__file__), "wav2vec2_emotion.onnx"),
-            os.path.join(os.getcwd(), "wav2vec2_emotion.onnx"),
-            "/app/wav2vec2_emotion.onnx",  # Common Railway path
-            *all_files  # Add any .onnx files found during recursive search
-        ]
-        
-        # Log all paths we're checking
-        logger.info(f"Checking these paths: {possible_paths}")
-        
-        # Check which paths exist and log their size
-        for path in possible_paths:
-            try:
-                exists = os.path.exists(path)
-                size = os.path.getsize(path) if exists else "N/A"
-                logger.info(f"Path: {path}, Exists: {exists}, Size: {size if exists else 'N/A'} bytes")
-            except Exception as e:
-                logger.warning(f"Error checking path {path}: {str(e)}")
-        
-        # Find first valid path
-        model_path = next((path for path in possible_paths if os.path.exists(path)), None)
-        
-        if model_path is None:
-            raise FileNotFoundError("Model file not found in any expected location")
-        
-        logger.info(f"Loading ONNX model from {model_path}")
-        
-        # Create inference session with additional logging
-        try:
-            # Try CPU execution provider first
-            session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
-            logger.info("Model loaded successfully with CPU provider")
-        except Exception as cpu_error:
-            logger.warning(f"Failed to load model with CPU provider: {cpu_error}")
-            # Try default providers
-            session = ort.InferenceSession(model_path)
-            logger.info("Model loaded successfully with default providers")
-        
-        # Log model inputs and outputs for debugging
-        input_names = [input.name for input in session.get_inputs()]
-        output_names = [output.name for output in session.get_outputs()]
-        logger.info(f"Model inputs: {input_names}")
-        logger.info(f"Model outputs: {output_names}")
-        
-        return True
-    
-    except Exception as e:
-        logger.error(f"Error loading model: {str(e)}")
-        return False
+# Model response type
+class PredictionResult(BaseModel):
+    emotion: str
+    confidence: float
+    all_scores: dict
 
-# Root endpoint for health check
 @app.get("/")
-async def root():
-    return {
-        "status": "online", 
-        "message": "API is running", 
-        "model_loaded": session is not None
-    }
+def read_root():
+    return {"message": "Voice Tone Analysis API", "status": "online"}
 
-# Try to load the model on startup
-model_loaded = load_model()
-id2label = {0: "calm", 1: "neutral", 2: "anxiety", 3: "confidence"}
+@app.get("/health")
+def health_check():
+    return {"status": "healthy"}
 
-# Function to convert MP3/OGG to WAV
-def convert_audio_to_wav(audio_bytes, format):
-    try:
-        audio = AudioSegment.from_file(io.BytesIO(audio_bytes), format=format)
-        wav_io = io.BytesIO()
-        audio.export(wav_io, format="wav")
-        return wav_io.getvalue()
-    except Exception as e:
-        logger.error(f"Error converting audio: {str(e)}")
-        raise HTTPException(status_code=400, detail=f"Audio conversion failed: {str(e)}")
-
-# Function to preprocess audio
-def preprocess_audio(audio_bytes, file_extension):
-    try:
-        if file_extension in ["mp3", "ogg"]:
-            audio_bytes = convert_audio_to_wav(audio_bytes, file_extension)
-        
-        audio, samplerate = sf.read(io.BytesIO(audio_bytes))
-        logger.info(f"Audio loaded: shape={audio.shape}, samplerate={samplerate}")
-        
-        if len(audio.shape) > 1:
-            audio = np.mean(audio, axis=1)  # Convert stereo to mono
-            logger.info(f"Converted to mono: shape={audio.shape}")
-        
-        return np.expand_dims(audio, axis=0).astype(np.float32)
-    except Exception as e:
-        logger.error(f"Error preprocessing audio: {str(e)}")
-        raise HTTPException(status_code=400, detail=f"Audio preprocessing failed: {str(e)}")
-
-# Softmax function
-def softmax(logits):
-    exp_logits = np.exp(logits - np.max(logits))  # Improve numerical stability
-    return exp_logits / np.sum(exp_logits)
-
-# Prediction endpoint
-@app.post("/predict/")
-async def predict_audio(file: UploadFile = File(...)):
-    global session
+def preprocess_audio(audio_data, sample_rate):
+    # Resample if needed (wav2vec2 expects 16kHz)
+    if sample_rate != 16000:
+        audio_data = librosa.resample(audio_data, orig_sr=sample_rate, target_sr=16000)
     
-    # Try to load model if not loaded
-    if session is None:
-        logger.warning("Model not loaded, attempting to load...")
-        model_loaded = load_model()
-        if not model_loaded or session is None:
-            raise HTTPException(status_code=503, detail="Model not loaded. Please check server logs.")
+    # Convert to float32 if not already
+    audio_data = audio_data.astype(np.float32)
     
+    # Normalize audio (if needed)
+    if np.abs(audio_data).max() > 1.0:
+        audio_data = audio_data / np.abs(audio_data).max()
+        
+    return audio_data
+
+@app.post("/predict", response_model=PredictionResult)
+async def predict_emotion(file: UploadFile = File(...)):
     try:
-        file_extension = file.filename.split(".")[-1].lower()
-        logger.info(f"Processing file: {file.filename}, extension: {file_extension}")
+        # Read audio file
+        content = await file.read()
+        audio_data, sample_rate = sf.read(io.BytesIO(content))
         
-        if file_extension not in ["wav", "mp3", "ogg"]:
-            return {"error": "Unsupported file format. Please upload WAV, MP3, or OGG."}
+        # Preprocess audio
+        processed_audio = preprocess_audio(audio_data, sample_rate)
         
-        audio_bytes = await file.read()
-        logger.info(f"File size: {len(audio_bytes)} bytes")
+        # Run inference
+        model_input = {input_name: np.expand_dims(processed_audio, axis=0)}
+        raw_prediction = onnx_session.run(None, model_input)
         
-        input_tensor = preprocess_audio(audio_bytes, file_extension)
-        logger.info(f"Preprocessed tensor shape: {input_tensor.shape}")
-
-        # Get input name from model
-        input_name = session.get_inputs()[0].name
-        logger.info(f"Using input name: {input_name}")
+        # Process prediction
+        scores = raw_prediction[0][0]
+        predicted_class = np.argmax(scores)
+        predicted_emotion = emotion_labels[predicted_class]
         
-        inputs = {input_name: input_tensor}
-        logger.info("Running inference...")
+        # Convert scores to probabilities using softmax
+        scores_exp = np.exp(scores - np.max(scores))
+        probabilities = scores_exp / scores_exp.sum()
         
-        outputs = session.run(None, inputs)
-        logger.info(f"Inference complete, output shape: {outputs[0].shape}")
+        # Create response
+        emotion_scores = {emotion: float(prob) for emotion, prob in zip(emotion_labels, probabilities)}
         
-        probabilities = softmax(outputs[0][0])
-        top_2_indices = np.argsort(probabilities)[-2:][::-1]
-        top_2_emotions = {id2label[i]: f"{round(probabilities[i] * 100)}%" for i in top_2_indices}
+        return PredictionResult(
+            emotion=predicted_emotion,
+            confidence=float(probabilities[predicted_class]),
+            all_scores=emotion_scores
+        )
         
-        logger.info(f"Prediction results: {top_2_emotions}")
-        return {"top_emotions": ", ".join([f"{k}: {v}" for k, v in top_2_emotions.items()])}
-    
     except Exception as e:
-        logger.error(f"Error in prediction: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing audio: {str(e)}")
 
-# Enhanced debugging endpoint
-@app.get("/debug")
-async def debug():
-    try:
-        # Get environment variables (hide sensitive info)
-        env_vars = {k: "***" if "SECRET" in k or "KEY" in k or "TOKEN" in k or "PASSWORD" in k or "URL" in k else v 
-                   for k, v in os.environ.items()}
-        
-        # Check for model in various locations
-        possible_paths = [
-            os.environ.get("MODEL_PATH", "wav2vec2_emotion.onnx"),
-            "wav2vec2_emotion.onnx",
-            "./wav2vec2_emotion.onnx",
-            os.path.join(os.path.dirname(__file__), "wav2vec2_emotion.onnx"),
-            os.path.join(os.getcwd(), "wav2vec2_emotion.onnx"),
-            "/app/wav2vec2_emotion.onnx",
-        ]
-        
-        model_checks = {}
-        for path in possible_paths:
-            try:
-                exists = os.path.exists(path)
-                size = os.path.getsize(path) if exists else None
-                is_file = os.path.isfile(path) if exists else None
-                permissions = None
-                if exists:
-                    try:
-                        permissions = oct(os.stat(path).st_mode & 0o777)
-                    except:
-                        permissions = "Failed to get permissions"
-                
-                model_checks[path] = {
-                    "exists": exists,
-                    "size_mb": size / (1024 * 1024) if size else None,
-                    "is_file": is_file,
-                    "permissions": permissions
-                }
-            except Exception as e:
-                model_checks[path] = {"error": str(e)}
-        
-        # Get recursive file listing
-        all_files = []
-        try:
-            for root, dirs, files in os.walk('.', topdown=True):
-                for file in files:
-                    if file.endswith('.onnx'):
-                        full_path = os.path.join(root, file)
-                        all_files.append({
-                            "path": full_path,
-                            "size_mb": os.path.getsize(full_path) / (1024 * 1024) if os.path.exists(full_path) else None
-                        })
-        except Exception as e:
-            all_files = [f"Error walking directory: {str(e)}"]
-        
-        # Check disk space
-        disk_info = {}
-        try:
-            import shutil
-            disk = shutil.disk_usage("/")
-            disk_info = {
-                "total_gb": disk.total / (1024**3),
-                "used_gb": disk.used / (1024**3),
-                "free_gb": disk.free / (1024**3),
-                "percent_used": disk.used / disk.total * 100
-            }
-        except:
-            disk_info = {"error": "Could not get disk info"}
-        
-        # Check memory usage
-        memory_info = {}
-        try:
-            import psutil
-            process = psutil.Process(os.getpid())
-            memory_info = {
-                "rss_mb": process.memory_info().rss / (1024 * 1024),
-                "vms_mb": process.memory_info().vms / (1024 * 1024)
-            }
-        except:
-            memory_info = {"error": "psutil not available"}
-            
-        # Get ONNX Runtime info
-        ort_info = {
-            "version": ort.__version__,
-            "available_providers": ort.get_available_providers(),
-            "device": ort.get_device()
-        }
-        
-        return {
-            "files_in_directory": os.listdir("."),
-            "onnx_files": all_files,
-            "model_checks": model_checks,
-            "current_directory": os.getcwd(),
-            "env_vars": env_vars,
-            "python_version": os.sys.version,
-            "model_loaded": session is not None,
-            "memory_usage": memory_info,
-            "disk_info": disk_info,
-            "onnxruntime_info": ort_info
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-# Add endpoint to explicitly reload model
-@app.post("/reload-model")
-async def reload_model():
-    global session
-    session = None
-    success = load_model()
-    if success and session is not None:
-        return {"status": "success", "message": "Model reloaded successfully"}
-    else:
-        raise HTTPException(status_code=500, detail="Failed to reload model")
-
-# Main execution block
+# If running the script directly
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
